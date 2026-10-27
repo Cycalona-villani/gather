@@ -1,0 +1,68 @@
+import { useEffect, useState, type FormEvent } from 'react'
+import type { User } from '@supabase/supabase-js'
+import { ArrowRight, CalendarDays, Check, ClipboardCopy, Heart, LogOut, MapPin, Plus, Send, Sparkles, Users, X } from 'lucide-react'
+import { configured, supabase } from './supabase'
+
+type Event = { id: string; slug: string; host_id: string; title: string; event_date: string; location: string; description: string; theme: string; created_at: string }
+type RSVP = { id: string; event_id: string; guest_name: string; email: string | null; status: 'yes'|'maybe'|'no'; party_size: number; note: string | null; created_at: string }
+const themes = [{ id:'sage', name:'Garden Sage' }, { id:'rose', name:'Soft Rose' }, { id:'lavender', name:'Lavender' }, { id:'blue', name:'Coastal Blue' }]
+const dateText = (s:string) => new Date(s).toLocaleString(undefined,{ dateStyle:'full', timeStyle:'short' })
+const eventLink = (slug:string) => `${window.location.origin}${window.location.pathname}#/invite/${slug}`
+
+function App() {
+  const [user,setUser] = useState<User|null>(null)
+  const [authReady,setAuthReady] = useState(false)
+  const [route,setRoute] = useState(window.location.hash)
+  const [events,setEvents] = useState<Event[]>([])
+  const [responses,setResponses] = useState<RSVP[]>([])
+  const [selected,setSelected] = useState<Event|null>(null)
+  const [creating,setCreating] = useState(false)
+  const [loading,setLoading] = useState(false)
+  const [message,setMessage] = useState('')
+  const [mode,setMode] = useState<'signup'|'login'>('signup')
+  const [publicEvent,setPublicEvent] = useState<Event|null>(null)
+  const [sent,setSent] = useState(false)
+  const [guestStatus,setGuestStatus] = useState<'yes'|'maybe'|'no'>('yes')
+  const isInvite = route.startsWith('#/invite/')
+  const slug = isInvite ? decodeURIComponent(route.slice('#/invite/'.length)) : ''
+
+  useEffect(()=>{ const fn=()=>{setRoute(window.location.hash);setMessage('');setSent(false)}; window.addEventListener('hashchange',fn); return ()=>window.removeEventListener('hashchange',fn) },[])
+  useEffect(()=>{
+    if(!supabase){setAuthReady(true);return}
+    supabase.auth.getUser().then(({data})=>{setUser(data.user);setAuthReady(true)})
+    const {data:{subscription}} = supabase.auth.onAuthStateChange((_event,session)=>setUser(session?.user??null))
+    return ()=>subscription.unsubscribe()
+  },[])
+  useEffect(()=>{if(user && !isInvite) void loadEvents(); else {setEvents([]);setSelected(null)}},[user,isInvite])
+  useEffect(()=>{
+    if(!isInvite || !supabase)return
+    let active=true; setPublicEvent(null)
+    supabase.rpc('get_public_event',{p_slug:slug}).then(({data,error})=>{
+      if(active){if(error)setMessage(error.message);setPublicEvent(Array.isArray(data)?(data[0]??null):null)}
+    })
+    return ()=>{active=false}
+  },[slug,isInvite])
+  async function loadEvents(){if(!supabase)return;const {data,error}=await supabase.from('events').select('*').order('event_date',{ascending:true}); if(error){setMessage(error.message);return};setEvents((data??[]) as Event[])}
+  async function selectEvent(event:Event){setSelected(event);setCreating(false);if(!supabase)return;const {data,error}=await supabase.from('rsvps').select('*').eq('event_id',event.id).order('created_at',{ascending:false});if(error)setMessage(error.message);else setResponses((data??[]) as RSVP[])}
+  async function auth(e:FormEvent<HTMLFormElement>){e.preventDefault();if(!supabase)return;setLoading(true);setMessage('');const form = new FormData(e.currentTarget);const email=String(form.get('email')),password=String(form.get('password')); const result= mode==='signup' ? await supabase.auth.signUp({email,password}) : await supabase.auth.signInWithPassword({email,password});setLoading(false);setMessage(result.error?.message??(mode==='signup' && !result.data.session?'Check your email to confirm your account.':''))}
+  async function create(e:FormEvent<HTMLFormElement>){e.preventDefault();if(!supabase||!user)return;setLoading(true);setMessage('');const f=new FormData(e.currentTarget);const date=String(f.get('date'));const {data,error}=await supabase.from('events').insert({host_id:user.id,title:String(f.get('title')).trim(),event_date:new Date(date).toISOString(),location:String(f.get('location')).trim(),description:String(f.get('description')).trim(),theme:String(f.get('theme')),slug:crypto.randomUUID()}).select('*').single();setLoading(false);if(error)setMessage(error.message);else{await loadEvents();setCreating(false);await selectEvent(data as Event)}}
+  async function submitRSVP(e:FormEvent<HTMLFormElement>){e.preventDefault();if(!supabase || !publicEvent)return;setLoading(true);setMessage('');const f=new FormData(e.currentTarget);const {error}=await supabase.rpc('submit_rsvp',{p_slug:slug,p_name:String(f.get('name')).trim(),p_email:String(f.get('email')).trim()||null,p_status:guestStatus,p_party_size:Number(f.get('partySize')??1),p_note:String(f.get('note')).trim()||null});setLoading(false);if(error)setMessage(error.message);else setSent(true)}
+  async function copyLink(slug:string){try{await navigator.clipboard.writeText(eventLink(slug));setMessage('Invitation link copied!')}catch{setMessage(`Share this link: ${eventLink(slug)}`)}}
+  const count=(status:string)=>responses.filter(r=>r.status===status).reduce((a,b)=>a+(status==='yes'?b.party_size:1),0)
+  return <div className="site">
+    <header className="topbar"><a href="#/" className="brand"><span className="brand-icon"><Heart size={21} fill="currentColor"/></span> gather<span className="brand-dot">.</span></a><nav>{!isInvite&&user ? <><span className="desktop-only muted">{user.email}</span><button className="quiet" onClick={()=>supabase?.auth.signOut()}><LogOut size={16}/> Sign out</button></> : <span className="nav-caption">Life is better together.</span>}</nav></header>
+    {!configured && <div className="config-banner">To activate Gather, connect Supabase. See <strong>README.md</strong> in the project files.</div>}
+    {isInvite ? <main className="invite-main">{publicEvent ? <div className={`invite-card theme-${publicEvent.theme}`}><div className="invite-top"><Sparkles size={23}/><span>YOU'RE INVITED</span><Sparkles size={23}/></div><h1>{publicEvent.title}</h1><p className="invite-message">{publicEvent.description||'We hope you can join us for a special celebration!'}</p><div className="invite-details"><div><CalendarDays size={19}/>{dateText(publicEvent.event_date)}</div><div><MapPin size={19}/>{publicEvent.location}</div></div>{sent?<div className="success-box"><Check size={30}/><h2>You're on the list!</h2><p>Thanks for your response. We can't wait to celebrate together.</p></div>:<form className="rsvp-form" onSubmit={submitRSVP}><h2>Will you join us?</h2><div className="choices">{(['yes','maybe','no'] as const).map(s=><button key={s} type="button" className={guestStatus===s?'choice active':'choice'} onClick={()=>setGuestStatus(s)}>{s==='yes'?'Joyfully accept':s==='maybe'?'Maybe':'Sorry, can’t make it'}</button>)}</div><label>Your name<input name="name" required maxLength={100} placeholder="First and last name"/></label><label>Email (optional)<input name="email" type="email" maxLength={200} placeholder="you@example.com"/></label>{guestStatus==='yes'&&<label>Total number attending (including you)<input name="partySize" type="number" min="1" max="20" defaultValue="1" required/></label>}<label>Message to the host (optional)<textarea name="note" maxLength={500} rows={3} placeholder="Can't wait!"/></label><button className="primary" disabled={loading}>{loading?'Sending…':'Send RSVP'} <Send size={17}/></button></form>}</div> : <div className="empty"><h2>Finding your invitation…</h2><p>If this stays blank, the link may be invalid or the database is not yet configured.</p></div>}{message&&<p className="feedback" role="status">{message}</p>}</main>
+    : !authReady ? <main className="empty">Loading Gather…</main>
+    : !user ? <main className="landing"><section className="hero"><div className="hero-copy"><div className="eyebrow"><Sparkles size={16}/> MORE THAN AN INVITATION</div><h1>Good times start <em>together.</em></h1><p className="hero-description">Create beautiful invitations, share them in a click, and keep every RSVP in one happy place.</p><div className="hero-chips"><span>✦ Celebrations</span><span>✦ Gatherings</span><span>✦ Every little moment</span></div><div className="sample"><span className="sample-script">You're invited</span><h2>Let's celebrate!</h2><p>Good food, great company, unforgettable memories.</p><span className="sample-line">♡ Save the date ♡</span></div></div><section className="auth-card"><div className="eyebrow">YOUR NEXT CELEBRATION AWAITS</div><h2>{mode==='signup'?'Join the gathering':'Welcome back'}</h2><p>{mode==='signup'?'Create your free account and start inviting.':'Sign in to manage your events.'}</p><form onSubmit={auth}><label>Email address<input name="email" type="email" autoComplete="email" required placeholder="you@example.com"/></label><label>Password<input name="password" type="password" minLength={6} autoComplete={mode==='signup'?'new-password':'current-password'} required placeholder="At least 6 characters"/></label><button className="primary" disabled={loading||!configured}>{loading?'One moment…':mode==='signup'?'Create my account':'Sign in'} <ArrowRight size={17}/></button></form><p className="auth-toggle">{mode==='signup'?'Already have an account?':'New to Gather?'} <button onClick={()=>{setMode(mode==='signup'?'login':'signup');setMessage('')}}>{mode==='signup'?'Sign in':'Create an account'}</button></p>{message&&<p className="feedback" role="status">{message}</p>}</section></section></main>
+    : <main className="dashboard"><div className="dashboard-head"><div><div className="eyebrow">YOUR CELEBRATIONS</div><h1>Make memories happen.</h1><p>Plan something special and bring your favorite people together.</p></div><button className="primary" onClick={()=>{setCreating(true);setSelected(null);setMessage('')}}><Plus size={18}/> Create event</button></div>
+      {creating ? <section className="panel form-panel"><div className="panel-head"><h2>Plan a new gathering</h2><button className="quiet" onClick={()=>setCreating(false)}><X size={19}/></button></div><form className="event-form" onSubmit={create}><label>Event name<input name="title" maxLength={120} required placeholder="e.g., Family Thanksgiving Dinner"/></label><div className="two"><label>Date & time<input name="date" type="datetime-local" required/></label><label>Location<input name="location" maxLength={200} required placeholder="Address or online meeting link"/></label></div><label>Personal message<textarea name="description" rows={4} maxLength={1000} placeholder="We'd love for you to join us!"/></label><label>Invitation theme<select name="theme">{themes.map(t=><option key={t.id} value={t.id}>{t.name}</option>)}</select></label><button className="primary" disabled={loading}>{loading?'Creating…':'Create invitation'} <ArrowRight size={17}/></button></form></section>
+      : selected ? <section className="panel detail-panel"><div className="panel-head"><button className="back-link" onClick={()=>setSelected(null)}>← All events</button><span className="event-pill">Invitation ready</span></div><div className={`detail-hero theme-${selected.theme}`}><div className="eyebrow">YOU'RE HOSTING</div><h2>{selected.title}</h2><p><CalendarDays size={17}/> {dateText(selected.event_date)}</p><p><MapPin size={17}/> {selected.location}</p></div><div className="action-row"><button className="primary" onClick={()=>copyLink(selected.slug)}><ClipboardCopy size={17}/> Copy invitation link</button><a className="outline-btn" target="_blank" rel="noreferrer" href={eventLink(selected.slug)}>Preview invitation ↗</a></div><h3>Guest overview</h3><div className="stats"><div><strong>{count('yes')}</strong><span>People attending</span></div><div><strong>{count('maybe')}</strong><span>Maybe</span></div><div><strong>{count('no')}</strong><span>Declined</span></div></div><div className="panel-head"><h3>Responses</h3><button className="quiet" onClick={()=>selectEvent(selected)}>Refresh</button></div>{responses.length ? <div className="guest-list">{responses.map(r=><div className="guest" key={r.id}><div><strong>{r.guest_name}</strong><small>{r.status==='yes'?`${r.party_size} attending`:r.status==='maybe'?'Maybe':'Cannot attend'}{r.note?` · ${r.note}`:''}</small></div><span className={`status status-${r.status}`}>{r.status==='yes'?'Going':r.status==='no'?'Declined':'Maybe'}</span></div>)}</div>:<p className="muted">No responses yet. Copy your invitation link to start collecting RSVPs.</p>}</section>
+      : events.length ? <div className="event-grid">{events.map(e=><button className={`event-tile theme-${e.theme}`} key={e.id} onClick={()=>selectEvent(e)}><div className="eyebrow">YOUR INVITATION</div><h2>{e.title}</h2><p><CalendarDays size={16}/>{dateText(e.event_date)}</p><p><MapPin size={16}/>{e.location}</p><span>Manage RSVPs <ArrowRight size={16}/></span></button>)}</div>
+      : <section className="empty-state"><div className="empty-illustration"><Users size={45}/><Heart size={27}/></div><h2>Your next memory starts here.</h2><p>From small dinners to big milestones, let's make it easy to bring everyone together.</p><button className="primary" onClick={()=>setCreating(true)}><Plus size={18}/> Create your first event</button></section>}
+      {message&&<p className="feedback" role="status">{message}</p>}
+    </main>}
+    <footer>Made for the moments that matter. <Heart size={13} fill="currentColor"/></footer>
+  </div>
+}
+export default App
